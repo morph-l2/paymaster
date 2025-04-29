@@ -29,7 +29,7 @@ fi
   --authrpc.addr=0.0.0.0 \
   --authrpc.port=8051 \
   --authrpc.vhosts="*" \
-  --authrpc.jwtsecret=/Users/fletcher/workspace/morph-l2/paymaster/build/jwt-secret.txt \
+  --authrpc.jwtsecret=./build/jwt-secret.txt \
   --gcmode=archive \
   --port=30303 \
   --metrics \
