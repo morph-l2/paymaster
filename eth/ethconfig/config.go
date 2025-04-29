@@ -28,6 +28,8 @@ import (
 	"github.com/morph-l2/go-ethereum/consensus/l2"
 	"github.com/morph-l2/go-ethereum/core/txpool/bundlepool"
 	"github.com/morph-l2/go-ethereum/core/txpool/legacypool"
+	"github.com/morph-l2/go-ethereum/paymaster"
+	"github.com/morph-l2/go-ethereum/paymaster/policy"
 
 	"github.com/morph-l2/go-ethereum/common"
 	"github.com/morph-l2/go-ethereum/consensus"
@@ -90,6 +92,8 @@ var Defaults = Config{
 	RPCGasCap:               50000000,
 	RPCEVMTimeout:           5 * time.Second,
 	GPO:                     FullNodeGPO,
+	PolicyMgr:               policy.DefaultConfig(),
+	Paymaster:               paymaster.DefaultConfig(),
 	RPCTxFeeCap:             1,  // 1 ether
 	MaxBlockRange:           -1, // Default unconfigured value: no block range limit for backward compatibility
 }
@@ -183,6 +187,12 @@ type Config struct {
 
 	// Gas Price Oracle options
 	GPO gasprice.Config
+
+	// Policy Manager options
+	PolicyMgr policy.Config
+
+	// Paymaster options
+	Paymaster paymaster.Config
 
 	// Enables tracking of SHA3 preimages in the VM
 	EnablePreimageRecording bool

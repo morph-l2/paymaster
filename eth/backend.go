@@ -54,6 +54,8 @@ import (
 	"github.com/morph-l2/go-ethereum/p2p/dnsdisc"
 	"github.com/morph-l2/go-ethereum/p2p/enode"
 	"github.com/morph-l2/go-ethereum/params"
+	"github.com/morph-l2/go-ethereum/paymaster"
+	"github.com/morph-l2/go-ethereum/paymaster/policy"
 	"github.com/morph-l2/go-ethereum/rlp"
 	"github.com/morph-l2/go-ethereum/rollup/batch"
 	"github.com/morph-l2/go-ethereum/rpc"
@@ -89,6 +91,8 @@ type Ethereum struct {
 
 	miner    *miner.Miner
 	gasPrice *big.Int
+
+	paymaster *paymaster.Paymaster
 
 	networkID     uint64
 	netRPCService *ethapi.PublicNetAPI
@@ -214,11 +218,14 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	eth.bloomIndexer.Start(eth.blockchain)
 
+	signer := types.LatestSigner(chainConfig)
+	policyMgr := policy.NewPolicyManager(config.PolicyMgr, signer)
+
 	if config.TxPool.Journal != "" {
 		config.TxPool.Journal = stack.ResolvePath(config.TxPool.Journal)
 	}
 
-	legacyPool := legacypool.New(config.TxPool, chainConfig, eth.blockchain)
+	legacyPool := legacypool.New(config.TxPool, chainConfig, eth.blockchain, policyMgr)
 	txPools := []txpool.SubPool{legacyPool}
 
 	bundlePool := &bundlepool.BundlePool{}
@@ -280,6 +287,13 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		gpoParams.Default = config.Miner.GasPrice
 	}
 	eth.APIBackend.gpo = gasprice.NewOracle(eth.APIBackend, gpoParams)
+
+	// new paymaster
+	paymaster, err := paymaster.New(config.Paymaster, policyMgr, eth.txPool, eth.blockchain, eth.APIBackend.gpo)
+	if err != nil {
+		return nil, err
+	}
+	eth.paymaster = paymaster
 
 	// Setup DNS discovery iterators.
 	dnsclient := dnsdisc.NewClient(dnsdisc.Config{})
@@ -348,6 +362,12 @@ func (s *Ethereum) APIs() []rpc.API {
 			Service:   downloader.NewPublicDownloaderAPI(s.handler.downloader, s.eventMux),
 			Public:    true,
 		}, {
+			Namespace: "pm",
+			Version:   "1.0",
+			Service:   paymaster.NewPaymasterAPI(s.paymaster),
+			Public:    false,
+		},
+		{
 			Namespace: "miner",
 			Version:   "1.0",
 			Service:   NewMinerAPI(s),
@@ -423,6 +443,9 @@ func (s *Ethereum) Protocols() []p2p.Protocol {
 // Start implements node.Lifecycle, starting all internal goroutines needed by the
 // Ethereum protocol implementation.
 func (s *Ethereum) Start() error {
+	// start the paymaster
+	s.paymaster.Start()
+
 	// start the batch handler
 	s.batchHandler.Start()
 
@@ -431,8 +454,9 @@ func (s *Ethereum) Start() error {
 	// Start the bloom bits servicing goroutines
 	s.startBloomHandlers(params.BloomBitsBlocks)
 
+	log.Info("node p2p handler is disabled for paymaster")
 	// Figure out a max peers count based on the server limits
-	maxPeers := s.p2pServer.MaxPeers
+	// maxPeers := s.p2pServer.MaxPeers
 	//if s.config.LightServ > 0 {
 	//	if s.config.LightPeers >= s.p2pServer.MaxPeers {
 	//		return fmt.Errorf("invalid peer config: light peer count (%d) >= total peer count (%d)", s.config.LightPeers, s.p2pServer.MaxPeers)
@@ -440,7 +464,7 @@ func (s *Ethereum) Start() error {
 	//	maxPeers -= s.config.LightPeers
 	//}
 	// Start the networking layer and the light server if requested
-	s.handler.Start(maxPeers)
+	// s.handler.Start(maxPeers)
 	return nil
 }
 
@@ -455,6 +479,7 @@ func (s *Ethereum) Stop() error {
 	// Then stop everything else.
 	s.bloomIndexer.Close()
 	close(s.closeBloomHandler)
+	s.paymaster.Close()
 	s.txPool.Close()
 	s.miner.Close()
 	s.batchHandler.Stop()

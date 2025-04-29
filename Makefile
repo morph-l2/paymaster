@@ -73,3 +73,8 @@ image:
 docker:
 	docker build -t morph/l2geth:latest ./ -f Dockerfile
 
+local-up:
+	sh ./run-local.sh
+
+local-clean:
+	rm -rf build/db

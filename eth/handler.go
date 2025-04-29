@@ -494,12 +494,6 @@ func (h *handler) Start(maxPeers int) {
 	h.txsSub = h.txpool.SubscribeNewTxsEvent(h.txsCh)
 	go h.txBroadcastLoop()
 
-	// broadcast mined blocks
-	//disable block broadcast, using beacon sync instead
-	//h.wg.Add(1)
-	//h.minedBlockSub = h.eventMux.Subscribe(core.NewMinedBlockEvent{})
-	//go h.minedBroadcastLoop()
-
 	// start sync handlers
 	h.wg.Add(1)
 	go h.chainSync.loop()

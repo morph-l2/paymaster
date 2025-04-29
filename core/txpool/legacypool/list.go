@@ -296,6 +296,31 @@ func (l *list) Contains(nonce uint64) bool {
 	return l.txs.Get(nonce) != nil
 }
 
+// AddIfNotExists attempts to add a transaction to the list. If a transaction with the same
+// hash already exists in the list, it returns false and does not modify the list.
+// Otherwise, it inserts the transaction into the list, regardless of whether there
+// is another transaction with the same nonce.
+//
+// It also updates the costcap and gascap of the list if the new transaction's cost
+// or gas exceeds the current maximum values.
+//
+// Returns a boolean indicating whether the transaction was added, and the old
+// transaction (if any) that was replaced.
+func (l *list) AddIfNotExists(tx *types.Transaction) (bool, *types.Transaction) {
+	old := l.txs.Get(tx.Nonce())
+	if old != nil && tx.Hash() == old.Hash() {
+		return false, nil
+	}
+	l.txs.Put(tx)
+	if cost := tx.Cost(); l.costcap.Cmp(cost) < 0 {
+		l.costcap = cost
+	}
+	if gas := tx.Gas(); l.gascap < gas {
+		l.gascap = gas
+	}
+	return true, old
+}
+
 // Add tries to insert a new transaction into the list, returning whether the
 // transaction was accepted, and if yes, any previous transaction it replaced.
 //

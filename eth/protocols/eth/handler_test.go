@@ -79,7 +79,7 @@ func newTestBackendWithGenerator(blocks int, generator func(int, *core.BlockGen)
 	txconfig := legacypool.DefaultConfig
 	txconfig.Journal = "" // Don't litter the disk with test journals
 
-	pool := legacypool.New(txconfig, params.TestChainConfig, chain)
+	pool := legacypool.New(txconfig, params.TestChainConfig, chain, nil)
 	txpool, _ := txpool.New(new(big.Int).SetUint64(txconfig.PriceLimit), chain, []txpool.SubPool{pool})
 
 	return &testBackend{

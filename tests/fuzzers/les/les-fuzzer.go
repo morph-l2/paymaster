@@ -131,7 +131,7 @@ type fuzzer struct {
 }
 
 func newFuzzer(input []byte) *fuzzer {
-	pool := legacypool.New(legacypool.DefaultConfig, params.TestChainConfig, chain)
+	pool := legacypool.New(legacypool.DefaultConfig, params.TestChainConfig, chain, nil)
 	txpool, _ := txpool.New(new(big.Int).SetUint64(legacypool.DefaultConfig.PriceLimit), chain, []txpool.SubPool{pool})
 
 	return &fuzzer{

@@ -88,6 +88,9 @@ var (
 	// current network configuration.
 	ErrTxTypeNotSupported = types.ErrTxTypeNotSupported
 
+	// ErrFeeNotZero is a sanity error to ensure a transaction fee is zero
+	ErrFeeNotZero = errors.New("fee not zero")
+
 	// ErrTipAboveFeeCap is a sanity error to ensure no one is able to specify a
 	// transaction with a tip higher than the total fee cap.
 	ErrTipAboveFeeCap = errors.New("max priority fee per gas higher than max fee per gas")

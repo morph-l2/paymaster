@@ -882,6 +882,34 @@ var (
 		Name:  "rpc.getlogs.maxrange",
 		Usage: "Limit max fetched block range for `eth_getLogs` method",
 	}
+
+	// Policy flags
+	WhitelistEnabledFlag = cli.BoolFlag{
+		Name:  "policy.whitelist",
+		Usage: "Enable whitelist policy (default = false)",
+	}
+	WhitelistedAddressesFlag = cli.StringSliceFlag{
+		Name:  "policy.whitelisted",
+		Usage: "List of whitelisted addresses",
+		Value: &cli.StringSlice{},
+	}
+	MaxGasLimitSponsoredFlag = cli.Uint64Flag{
+		Name:  "policy.maxgaslimit",
+		Usage: "Maximum sponsored gas limit (default = 1000000)",
+		Value: 1000000,
+	}
+
+	// Paymaster flags
+	PaymasterPrivateKeyFlag = cli.StringFlag{
+		Name:  "paymaster.privatekey",
+		Usage: "Private key for signing paymaster transactions",
+		Value: "",
+	}
+	ProcessorIntervalFlag = cli.DurationFlag{
+		Name:  "paymaster.interval",
+		Usage: "Interval for processing pending transactions",
+		Value: 10 * time.Second,
+	}
 )
 
 // MakeDataDir retrieves the currently requested data directory, terminating
@@ -1587,6 +1615,34 @@ func setMaxBlockRange(ctx *cli.Context, cfg *ethconfig.Config) {
 	}
 }
 
+func setPolicyMgr(ctx *cli.Context, cfg *ethconfig.Config) {
+	if ctx.GlobalIsSet(WhitelistEnabledFlag.Name) {
+		cfg.PolicyMgr.WhitelistEnabled = ctx.GlobalBool(WhitelistEnabledFlag.Name)
+	}
+	if ctx.GlobalIsSet(WhitelistedAddressesFlag.Name) {
+		whitelistedAddrs := ctx.GlobalStringSlice(WhitelistedAddressesFlag.Name)
+		cfg.PolicyMgr.WhitelistedAddresses = make([]common.Address, 0, len(whitelistedAddrs))
+		for _, addr := range whitelistedAddrs {
+			if !common.IsHexAddress(addr) {
+				Fatalf("Invalid whitelisted address: %s", addr)
+			}
+			cfg.PolicyMgr.WhitelistedAddresses = append(cfg.PolicyMgr.WhitelistedAddresses, common.HexToAddress(addr))
+		}
+	}
+	if ctx.GlobalIsSet(MaxGasLimitSponsoredFlag.Name) {
+		cfg.PolicyMgr.MaxGasLimitSponsored = ctx.GlobalUint64(MaxGasLimitSponsoredFlag.Name)
+	}
+}
+
+func setPaymaster(ctx *cli.Context, cfg *ethconfig.Config) {
+	if ctx.GlobalIsSet(PaymasterPrivateKeyFlag.Name) {
+		cfg.Paymaster.PrivateKey = ctx.GlobalString(PaymasterPrivateKeyFlag.Name)
+	}
+	if ctx.GlobalIsSet(ProcessorIntervalFlag.Name) {
+		cfg.Paymaster.ProcessorInterval = ctx.GlobalDuration(ProcessorIntervalFlag.Name)
+	}
+}
+
 // CheckExclusive verifies that only a single instance of the provided flags was
 // set by the user. Each flag might optionally be followed by a string type to
 // specialize it further.
@@ -1654,6 +1710,8 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	setWhitelist(ctx, cfg)
 	setLes(ctx, cfg)
 	setMaxBlockRange(ctx, cfg)
+	setPolicyMgr(ctx, cfg)
+	setPaymaster(ctx, cfg)
 
 	// Cap the cache allowance and tune the garbage collector
 	mem, err := gopsutil.VirtualMemory()

@@ -63,6 +63,9 @@ var (
 	// ErrTxPoolOverflow is returned if the transaction pool is full and can't accept
 	// another remote transaction.
 	ErrTxPoolOverflow = errors.New("txpool is full")
+
+	// ErrNotSponsorable is returned if the transaction is not sponsorable.
+	ErrNotSponsorable = errors.New("transaction is not sponsorable")
 )
 
 var (
@@ -118,6 +121,10 @@ type BlockChain interface {
 	SubscribeChainHeadEvent(ch chan<- core.ChainHeadEvent) event.Subscription
 }
 
+type PolicyManager interface {
+	Sponsorable(tx *types.Transaction) (bool, error)
+}
+
 // Config are the configuration parameters of the transaction pool.
 type Config struct {
 	Locals    []common.Address // Addresses that should be treated by default as local
@@ -141,7 +148,7 @@ type Config struct {
 // DefaultConfig contains the default configurations for the transaction pool.
 var DefaultConfig = Config{
 	Journal:   "transactions.rlp",
-	Rejournal: time.Hour,
+	Rejournal: 15 * time.Minute,
 
 	PriceLimit: 1,
 	PriceBump:  10,
@@ -151,7 +158,7 @@ var DefaultConfig = Config{
 	AccountQueue: 64,
 	GlobalQueue:  1024,
 
-	Lifetime: 3 * time.Hour,
+	Lifetime: 30 * time.Minute,
 }
 
 // sanitize checks the provided user configurations and changes anything that's
@@ -204,6 +211,7 @@ type LegacyPool struct {
 	config      Config
 	chainconfig *params.ChainConfig
 	chain       BlockChain
+	policy      PolicyManager
 	gasPrice    atomic.Pointer[big.Int]
 	txMaxSize   int
 	txFeed      event.Feed
@@ -249,7 +257,7 @@ type txpoolResetRequest struct {
 
 // NewLegacyPool creates a new transaction pool to gather, sort and filter inbound
 // transactions from the network.
-func New(config Config, chainconfig *params.ChainConfig, chain BlockChain) *LegacyPool {
+func New(config Config, chainconfig *params.ChainConfig, chain BlockChain, policy PolicyManager) *LegacyPool {
 	// Sanitize the input to ensure no vulnerable gas prices are set
 	config = (&config).sanitize()
 
@@ -264,6 +272,7 @@ func New(config Config, chainconfig *params.ChainConfig, chain BlockChain) *Lega
 		config:          config,
 		chainconfig:     chainconfig,
 		chain:           chain,
+		policy:          policy,
 		txMaxSize:       rawTxMaxSize,
 		signer:          types.LatestSigner(chainconfig),
 		pending:         make(map[common.Address]*list),
@@ -379,10 +388,6 @@ func (pool *LegacyPool) loop() {
 		case <-evict.C:
 			pool.mu.Lock()
 			for addr := range pool.queue {
-				// Skip local transactions from the eviction mechanism
-				if pool.locals.contains(addr) {
-					continue
-				}
 				// Any non-locals old enough should be removed
 				if time.Since(pool.beats[addr]) > pool.config.Lifetime {
 					list := pool.queue[addr].Flatten()
@@ -602,7 +607,7 @@ func (pool *LegacyPool) local() map[common.Address]types.Transactions {
 
 // validateTx checks whether a transaction is valid according to the consensus
 // rules and adheres to some heuristic limits of the local node (price and size).
-func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
+func (pool *LegacyPool) validateTx(tx *types.Transaction) error {
 	// No unauthenticated deposits allowed in the transaction pool.
 	if tx.IsL1MessageTx() || tx.Type() == types.BlobTxType {
 		return core.ErrTxTypeNotSupported
@@ -634,6 +639,9 @@ func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
 	if pool.currentMaxGas < tx.Gas() {
 		return txpool.ErrGasLimit
 	}
+	if tx.Gas() > params.BundleGasLimit-params.TxGas {
+		return txpool.ErrTxGasLimit
+	}
 	// Sanity check for extremely large numbers
 	if tx.GasFeeCap().BitLen() > 256 {
 		return core.ErrFeeCapVeryHigh
@@ -641,10 +649,15 @@ func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
 	if tx.GasTipCap().BitLen() > 256 {
 		return core.ErrTipVeryHigh
 	}
+	// Ensure gasFeeCap is zero
+	if tx.GasFeeCap().Cmp(common.Big0) != 0 {
+		return core.ErrFeeNotZero
+	}
 	// Ensure gasFeeCap is greater than or equal to gasTipCap.
 	if tx.GasFeeCapIntCmp(tx.GasTipCap()) < 0 {
 		return core.ErrTipAboveFeeCap
 	}
+
 	// Make sure the transaction is signed properly.
 	from, err := types.Sender(pool.signer, tx)
 	if err != nil {
@@ -652,10 +665,6 @@ func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
 	}
 	if pool.blacklist != nil && !pool.blacklist.Validate(tx) {
 		return txpool.ErrTxNotAllowed
-	}
-	// Drop non-local transactions under our own minimal accepted gas price or tip.
-	if !local && tx.GasFeeCapIntCmp(pool.gasPrice.Load()) < 0 {
-		return txpool.ErrUnderpriced
 	}
 	// Ensure the transaction adheres to nonce ordering
 	if pool.currentState.GetNonce(from) > tx.Nonce() {
@@ -665,20 +674,8 @@ func (pool *LegacyPool) validateTx(tx *types.Transaction, local bool) error {
 	// Transactor should have enough funds to cover the costs
 	// cost == V + GP * GL
 	if pool.currentState.GetBalance(from).Cmp(tx.Cost()) < 0 {
-		return core.ErrInsufficientFunds
-	}
-	// 2. If FeeVault is enabled, perform an additional check for L1 data fees.
-	if pool.chainconfig.Morph.FeeVaultEnabled() {
-		// Get L1 data fee in current state
-		l1DataFee, err := fees.CalculateL1DataFee(tx, pool.currentState, pool.chainconfig, pool.currentHead)
-		if err != nil {
-			return fmt.Errorf("failed to calculate L1 data fee, err: %w", err)
-		}
-		// Transactor should have enough funds to cover the costs
-		// cost == L1 data fee + V + GP * GL
-		if b := pool.currentState.GetBalance(from); b.Cmp(new(big.Int).Add(tx.Cost(), l1DataFee)) < 0 {
-			return errors.New("invalid transaction: insufficient funds for l1fee + gas * price + value")
-		}
+		return fmt.Errorf("%w: address %v have %v want %v", core.ErrInsufficientFunds, from.Hex(), pool.currentState.GetBalance(from).String(), tx.Cost().String())
+		//return core.ErrInsufficientFunds
 	}
 	// Ensure the transaction has more gas than the basic tx fee.
 	intrGas, err := core.IntrinsicGas(tx.Data(), tx.AccessList(), tx.To() == nil, true, pool.istanbul, pool.shanghai)
@@ -711,10 +708,21 @@ func (pool *LegacyPool) add(tx *types.Transaction, local bool) (replaced bool, e
 	isLocal := local || pool.locals.containsTx(tx)
 
 	// If the transaction fails basic validation, discard it
-	if err := pool.validateTx(tx, isLocal); err != nil {
+	if err := pool.validateTx(tx); err != nil {
 		log.Trace("Discarding invalid transaction", "hash", hash, "err", err)
 		invalidTxMeter.Mark(1)
 		return false, err
+	}
+
+	if pool.policy != nil {
+		sponsorable, err := pool.policy.Sponsorable(tx)
+		if err != nil {
+			log.Error("Failed to check transaction sponsorship", "hash", hash, "err", err)
+			return false, ErrNotSponsorable
+		}
+		if !sponsorable {
+			return false, ErrNotSponsorable
+		}
 	}
 
 	// already validated by this point
@@ -722,70 +730,15 @@ func (pool *LegacyPool) add(tx *types.Transaction, local bool) (replaced bool, e
 
 	// If the transaction pool is full, discard underpriced transactions
 	if uint64(pool.all.Slots()+numSlots(tx)) > pool.config.GlobalSlots+pool.config.GlobalQueue {
-		// If the new transaction is underpriced, don't accept it
-		if !isLocal && pool.priced.Underpriced(tx) {
-			log.Trace("Discarding underpriced transaction", "hash", hash, "gasTipCap", tx.GasTipCap(), "gasFeeCap", tx.GasFeeCap())
-			underpricedTxMeter.Mark(1)
-			return false, txpool.ErrUnderpriced
-		}
-
-		// We're about to replace a transaction. The reorg does a more thorough
-		// analysis of what to remove and how, but it runs async. We don't want to
-		// do too many replacements between reorg-runs, so we cap the number of
-		// replacements to 25% of the slots
-		if pool.changesSinceReorg > int(pool.config.GlobalSlots/4) {
-			throttleTxMeter.Mark(1)
-			return false, ErrTxPoolOverflow
-		}
-
-		// New transaction is better than our worse ones, make room for it.
-		// If it's a local transaction, forcibly discard all available transactions.
-		// Otherwise if we can't make enough room for new one, abort the operation.
-		drop, success := pool.priced.Discard(pool.all.Slots()-int(pool.config.GlobalSlots+pool.config.GlobalQueue)+numSlots(tx), isLocal)
-
-		// Special case, we still can't make the room for the new remote one.
-		if !isLocal && !success {
-			log.Trace("Discarding overflown transaction", "hash", hash)
-			overflowedTxMeter.Mark(1)
-			return false, ErrTxPoolOverflow
-		}
-
-		// If the new transaction is a future transaction it should never churn pending transactions
-		if !isLocal && pool.isGapped(from, tx) {
-			var replacesPending bool
-			for _, dropTx := range drop {
-				dropSender, _ := types.Sender(pool.signer, dropTx)
-				if list := pool.pending[dropSender]; list != nil && list.Contains(dropTx.Nonce()) {
-					replacesPending = true
-					break
-				}
-			}
-			// Add all transactions back to the priced queue
-			if replacesPending {
-				for _, dropTx := range drop {
-					pool.priced.Put(dropTx, false)
-				}
-				log.Trace("Discarding future transaction replacing pending tx", "hash", hash)
-				return false, txpool.ErrFutureReplacePending
-			}
-		}
-
-		// Kick out the underpriced remote transactions.
-		for _, tx := range drop {
-			log.Trace("Discarding freshly underpriced transaction", "hash", tx.Hash(), "gasTipCap", tx.GasTipCap(), "gasFeeCap", tx.GasFeeCap())
-			underpricedTxMeter.Mark(1)
-			dropped := pool.removeTx(tx.Hash(), false)
-			pool.changesSinceReorg += dropped
-		}
+		return false, ErrTxPoolOverflow
 	}
 
 	// Try to replace an existing transaction in the pending pool
 	if list := pool.pending[from]; list != nil && list.Contains(tx.Nonce()) {
-		// Nonce already pending, check if required price bump is met
-		inserted, old := list.Add(tx, pool.currentState, pool.config.PriceBump, pool.chainconfig, pool.currentHead)
+		inserted, old := list.AddIfNotExists(tx)
 		if !inserted {
 			pendingDiscardMeter.Mark(1)
-			return false, txpool.ErrReplaceUnderpriced
+			return false, txpool.ErrAlreadyKnown
 		}
 		// New transaction is better, replace old one
 		if old != nil {
@@ -857,12 +810,13 @@ func (pool *LegacyPool) enqueueTx(hash common.Hash, tx *types.Transaction, local
 		pool.queue[from] = newList(false)
 	}
 
-	inserted, old := pool.queue[from].Add(tx, pool.currentState, pool.config.PriceBump, pool.chainconfig, pool.currentHead)
+	inserted, old := pool.queue[from].AddIfNotExists(tx)
 	if !inserted {
 		// An older transaction was better, discard this
 		queuedDiscardMeter.Mark(1)
-		return false, txpool.ErrReplaceUnderpriced
+		return false, txpool.ErrAlreadyKnown
 	}
+
 	// Discard any previous transaction and mark this
 	if old != nil {
 		pool.all.Remove(old.Hash())
@@ -1499,17 +1453,6 @@ func (pool *LegacyPool) executableTxFilter(costLimit *big.Int) func(tx *types.Tr
 		if tx.Gas() > pool.currentMaxGas || tx.Cost().Cmp(costLimit) > 0 {
 			return true
 		}
-
-		if pool.chainconfig.Morph.FeeVaultEnabled() {
-			// recheck L1 data fee, as the oracle price may have changed
-			l1DataFee, err := fees.CalculateL1DataFee(tx, pool.currentState, pool.chainconfig, pool.currentHead)
-			if err != nil {
-				log.Error("Failed to calculate L1 data fee", "err", err, "tx", tx)
-				return false
-			}
-			return costLimit.Cmp(new(big.Int).Add(tx.Cost(), l1DataFee)) < 0
-		}
-
 		return false
 	}
 }
@@ -1614,9 +1557,7 @@ func (pool *LegacyPool) truncateQueue() {
 	// Sort all accounts with queued transactions by heartbeat
 	addresses := make(addressesByHeartbeat, 0, len(pool.queue))
 	for addr := range pool.queue {
-		if !pool.locals.contains(addr) { // don't drop locals
-			addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
-		}
+		addresses = append(addresses, addressByHeartbeat{addr, pool.beats[addr]})
 	}
 	sort.Sort(addresses)
 

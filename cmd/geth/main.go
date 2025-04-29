@@ -198,6 +198,14 @@ var (
 		utils.BatchResponseMaxSize,
 	}
 
+	paymasterFlags = []cli.Flag{
+		utils.WhitelistEnabledFlag,
+		utils.WhitelistedAddressesFlag,
+		utils.MaxGasLimitSponsoredFlag,
+		utils.PaymasterPrivateKeyFlag,
+		utils.ProcessorIntervalFlag,
+	}
+
 	metricsFlags = []cli.Flag{
 		utils.MetricsEnabledFlag,
 		utils.MetricsEnabledExpensiveFlag,
@@ -260,6 +268,7 @@ func init() {
 	app.Flags = append(app.Flags, consoleFlags...)
 	app.Flags = append(app.Flags, debug.Flags...)
 	app.Flags = append(app.Flags, metricsFlags...)
+	app.Flags = append(app.Flags, paymasterFlags...)
 
 	app.Before = func(ctx *cli.Context) error {
 		return debug.Setup(ctx)
